@@ -7,6 +7,7 @@ constructor_args:
   - launcher_param:
       trig_gear_ratio: 19.2032
       num_trig_tooth: 6
+      speed_sync: false
   - cmd: '@&cmd'
   - fric_setpoint_speed_0: 3900.0
   - fric_setpoint_speed_1: 2700.0
@@ -74,7 +75,6 @@ depends:
   - xrobot-org/Referee
 === END MANIFEST === */
 // clang-format on
-#include <sys/syslimits.h>
 
 #include <algorithm>
 #include <array>
@@ -89,12 +89,10 @@ depends:
 #include "event.hpp"
 #include "libxr_def.hpp"
 #include "libxr_time.hpp"
-#include "message.hpp"
 #include "mutex.hpp"
 #include "pid.hpp"
 #include "thread.hpp"
-#include "timebase.hpp"
-#define UI_LAUNCHER_LAYER 2
+#define UI_HERO_LAUNCHER_LAYER 2
 
 /**
  * @brief 英雄发射机构独立实现
@@ -136,6 +134,7 @@ class HeroLauncher {
   struct LauncherParam {
     float trig_gear_ratio;
     uint8_t num_trig_tooth;
+    bool speed_sync;
   };
   /**
    * @brief 构造 HeroLauncher
@@ -171,6 +170,7 @@ class HeroLauncher {
       RMMotor* motor_trig, Referee* ref,
       LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM)
       : cmd_(cmd),
+        speed_sync_(launcher_param.speed_sync),
         trig_angle_pid_(pid_trig_angle),
         trig_speed_pid_(pid_trig_speed),
         fric_speed_pid_({{LibXR::PID<float>(pid_fric_speed_0),
@@ -235,7 +235,7 @@ class HeroLauncher {
                     event_callback);
 
     void (*DrawUi)(HeroLauncher*) = [](HeroLauncher* hero) { hero->DrawUI(); };
-    ui_timer_handle_ = LibXR::Timer::CreateTask(DrawUi, this, 125);
+    ui_timer_handle_ = LibXR::Timer::CreateTask(DrawUi, this, 47);
     LibXR::Timer::Add(ui_timer_handle_);
     LibXR::Timer::Start(ui_timer_handle_);
   }
@@ -293,6 +293,8 @@ class HeroLauncher {
 
   bool first_loading_ = true;
 
+  bool speed_sync_ = false;
+
   bool soft_start_finish_ = false;
 
   float dt_ = 0.0f;
@@ -327,9 +329,9 @@ class HeroLauncher {
   std::array<LibXR::PID<float>, FRIC_NUM> fric_speed_pid_;
 
   LibXR::PID<float> fric_sync_pid_front_{LibXR::PID<float>::Param{
-      1.0f, 0.00005f, 0.0f, 0.0f, 0.0f, 0.5f, false}};  // 前摩擦轮同步PID (0-1)
+      1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, false}};  // 前摩擦轮同步PID (0-1)
   LibXR::PID<float> fric_sync_pid_back_{LibXR::PID<float>::Param{
-      1.0f, 0.00005f, 0.0f, 0.0f, 0.0f, 0.5f, false}};  // 后摩擦轮同步PID (2-3)
+      1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, false}};  // 后摩擦轮同步PID (2-3)
 
   float trig_gear_ratio_;
   uint8_t num_trig_tooth_;
@@ -524,6 +526,11 @@ class HeroLauncher {
     delay_time_ = 0;
 
     soft_start_finish_ = false;
+
+    for (int i = 0; i < FRIC_NUM; i++) {
+      fric_motor_[i]->Relax();
+    }
+    motor_trig_->Relax();
   }
 
   /**
@@ -619,7 +626,8 @@ class HeroLauncher {
    */
   void NormalFireControl() {
     if (trig_mode_ == TrigMode::SINGLE) {
-      if (!enable_fire_ && mark_launch_) {
+      mark_launch_ = false;
+      if (!enable_fire_) {
         if (heat_ctrl_.available_shot) {
           trig_setpoint_angle_ -= static_cast<float>(LibXR::TWO_PI) /
                                   static_cast<float>(num_trig_tooth_);
@@ -632,16 +640,12 @@ class HeroLauncher {
         }
       }
     }
-    now_ = LibXR::Timebase::GetMilliseconds();
 
-    // 添加发射超时检测（超过1000毫秒未检测到发弹则重置状态）
-    if (start_fire_time_ > 0 && (now_ - start_fire_time_ > 1000) &&
+    // 添加发射超时检测（超过100毫秒未检测到发弹则重置状态）
+    if (start_fire_time_ > 0 && (now_ - start_fire_time_ > 100) &&
         !mark_launch_) {
-      fire_flag_ = true;
+      fire_flag_ = false;
       enable_fire_ = false;
-      mark_launch_ = true;
-      stuck = true;
-      first_loading_ = true;
       start_fire_time_ = now_;
     }
 
@@ -662,33 +666,39 @@ class HeroLauncher {
    * @brief 摩擦轮PID控制输出
    */
   void FricPidControl() {
-    float fric_outputs[FRIC_NUM];
-    for (int i = 0; i < FRIC_NUM; i++) {
-      fric_outputs[i] = fric_speed_pid_[i].Calculate(
-          fric_target_rpm_[i], param_motor_fric_[i].velocity, dt_);
+    if (speed_sync_) {
+      float fric_outputs[FRIC_NUM];
+      for (int i = 0; i < FRIC_NUM; i++) {
+        fric_outputs[i] = fric_speed_pid_[i].Calculate(
+            fric_target_rpm_[i], param_motor_fric_[i].velocity, dt_);
+      }
+      // 前摩擦轮同步控制 (0-1)
+      float front_speed_diff =
+          param_motor_fric_[0].velocity - param_motor_fric_[1].velocity;
+      float front_sync_output =
+          fric_sync_pid_front_.Calculate(0.0f, front_speed_diff, dt_);
+
+      // 后摩擦轮同步控制 (2-3)
+      float back_speed_diff =
+          param_motor_fric_[2].velocity - param_motor_fric_[3].velocity;
+      float back_sync_output =
+          fric_sync_pid_back_.Calculate(0.0f, back_speed_diff, dt_);
+
+      // 将同步输出叠加到各摩擦轮
+      cmd_fric_[0].velocity =
+          fric_outputs[0] + front_sync_output;  // 前左 + 同步输出
+      cmd_fric_[1].velocity =
+          fric_outputs[1] - front_sync_output;  // 前右 - 同步输出
+      cmd_fric_[2].velocity =
+          fric_outputs[2] + back_sync_output;  // 后左 + 同步输出
+      cmd_fric_[3].velocity =
+          fric_outputs[3] - back_sync_output;  // 后右 - 同步输出
+    } else {
+      for (int i = 0; i < FRIC_NUM; i++) {
+        cmd_fric_[i].velocity = fric_speed_pid_[i].Calculate(
+            fric_target_rpm_[i], param_motor_fric_[i].velocity, dt_);
+      }
     }
-
-    // 前摩擦轮同步控制 (0-1)
-    float front_speed_diff =
-        param_motor_fric_[0].velocity - param_motor_fric_[1].velocity;
-    float front_sync_output =
-        fric_sync_pid_front_.Calculate(0.0f, front_speed_diff, dt_);
-
-    // 后摩擦轮同步控制 (2-3)
-    float back_speed_diff =
-        param_motor_fric_[2].velocity - param_motor_fric_[3].velocity;
-    float back_sync_output =
-        fric_sync_pid_back_.Calculate(0.0f, back_speed_diff, dt_);
-
-    // 将同步输出叠加到各摩擦轮
-    cmd_fric_[0].velocity =
-        fric_outputs[0] + front_sync_output;  // 前左 + 同步输出
-    cmd_fric_[1].velocity =
-        fric_outputs[1] - front_sync_output;  // 前右 - 同步输出
-    cmd_fric_[2].velocity =
-        fric_outputs[2] + back_sync_output;  // 后左 + 同步输出
-    cmd_fric_[3].velocity =
-        fric_outputs[3] - back_sync_output;  // 后右 - 同步输出
 
     for (int i = 0; i < FRIC_NUM; i++) {
       fric_motor_[i]->Control(cmd_fric_[i]);
@@ -770,7 +780,7 @@ class HeroLauncher {
 
     // 首次绘制使用ADD，后续使用MODIFY
     Referee::UIFigureOp ADD_OP = Referee::UIFigureOp::UI_OP_MODIFY;
-    if (this->ui_tick_ % 4 == 0) {
+    if (this->ui_tick_ % 5 == 0) {
       ADD_OP = Referee::UIFigureOp::UI_OP_ADD;
     }
 
@@ -792,67 +802,69 @@ class HeroLauncher {
     float trig_pos =
         LibXR::CycleValue<float>(-this->trig_angle_) / 6.2832f * 360.0f;
     uint16_t arc_mid = static_cast<uint16_t>(trig_pos);
-    uint16_t arc_start = static_cast<uint16_t>((arc_mid + 345) % 360);
-    uint16_t arc_end = static_cast<uint16_t>((arc_mid + 15) % 360);
+    uint16_t arc_start = static_cast<uint16_t>((arc_mid + 330) % 360);
+    uint16_t arc_end = static_cast<uint16_t>((arc_mid + 30) % 360);
     if (arc_start >= arc_end) arc_end += 360;
 
     // 拨弹盘颜色：根据模式判断（校准模式为橙色，其他为青色）
-    auto trig_color =
-        (trig_mode_ == TrigMode::SAFE || trig_mode_ == TrigMode::RELAX)
-            ? Referee::UIColor::UI_COLOR_ORANGE
-            : Referee::UIColor::UI_COLOR_CYAN;
+    auto trig_color = first_loading_ ? Referee::UIColor::UI_COLOR_ORANGE
+                                     : Referee::UIColor::UI_COLOR_CYAN;
 
     switch (ui_step_) {
       case 0: {
         // 绘制前摩擦轮状态
         Referee::UIFigure2 fig_front{};
         ref_->FillCircle(fig_front.interaction_figure[0], "lfl", ADD_OP,
-                         UI_LAUNCHER_LAYER, fric_color_0, 5, 1650, 600, 25);
+                         UI_HERO_LAUNCHER_LAYER, fric_color_0, 4, 1600, 820,
+                         25);
         ref_->FillCircle(fig_front.interaction_figure[1], "lfr", ADD_OP,
-                         UI_LAUNCHER_LAYER, fric_color_1, 5, 1750, 600, 25);
+                         UI_HERO_LAUNCHER_LAYER, fric_color_1, 4, 1680, 820,
+                         25);
         ref_->SendUIFigure2(robot_id, client_id, fig_front);
+        this->ui_tick_ += 1;
         break;
       }
       case 1: {
         // 绘制后摩擦轮状态
         Referee::UIFigure2 fig_back{};
         ref_->FillCircle(fig_back.interaction_figure[0], "lbl", ADD_OP,
-                         UI_LAUNCHER_LAYER, fric_color_2, 5, 1650, 670, 25);
+                         UI_HERO_LAUNCHER_LAYER, fric_color_2, 4, 1600, 750,
+                         25);
         ref_->FillCircle(fig_back.interaction_figure[1], "lbr", ADD_OP,
-                         UI_LAUNCHER_LAYER, fric_color_3, 5, 1750, 670, 25);
+                         UI_HERO_LAUNCHER_LAYER, fric_color_3, 4, 1680, 750,
+                         25);
         ref_->SendUIFigure2(robot_id, client_id, fig_back);
         break;
       }
       case 2: {
         // 绘制拨弹盘位置
         Referee::UIFigure fig_trig{};
-        ref_->FillArc(fig_trig, "lta", ADD_OP, UI_LAUNCHER_LAYER, trig_color, 4,
-                      1700, 400, arc_start, arc_end, 80, 80);
+        ref_->FillArc(fig_trig, "lta", ADD_OP, UI_HERO_LAUNCHER_LAYER,
+                      trig_color, 3, 1640, 640, arc_start, arc_end, 80, 80);
         ref_->SendUIFigure(robot_id, client_id, fig_trig);
-        this->ui_tick_ += 1;
         break;
       }
       case 3: {
-        // 显示卡弹警告
-        if (stuck) {
-          Referee::UICharacter char_fig{};
-          ref_->FillCharacter(char_fig, "lstk", ADD_OP, UI_LAUNCHER_LAYER,
-                              Referee::UIColor::UI_COLOR_YELLOW, 24, 2, 1600,
-                              300, "MAN! It is stuck!!");
-          ref_->SendUICharacter(robot_id, client_id, char_fig);
-        } else {
-          // 清除卡弹警告文本
-          Referee::UICharacter char_fig{};
-          ref_->FillCharacter(char_fig, "lstk", ADD_OP, UI_LAUNCHER_LAYER,
-                              Referee::UIColor::UI_COLOR_BLACK, 24, 2, 1600,
-                              300, "");
-          ref_->SendUICharacter(robot_id, client_id, char_fig);
-        }
-        default:
-          break;
+        // 竖直画线 - 主瞄准线
+        Referee::UIFigure fig_line{};
+        ref_->FillLine(fig_line, "ctrln", ADD_OP, UI_HERO_LAUNCHER_LAYER,
+                       Referee::UIColor::UI_COLOR_WHITE, 2, 960, 150, 960, 900);
+        ref_->SendUIFigure(robot_id, client_id, fig_line);
+        break;
       }
+      case 4: {
+        // 水平瞄准线 - 下方第一条
 
-        this->ui_step_ = (this->ui_step_ + 1) % 4;
+        Referee::UIFigure fig_bot2{};
+        ref_->FillLine(fig_bot2, "hlb1", ADD_OP, UI_HERO_LAUNCHER_LAYER,
+                       Referee::UIColor::UI_COLOR_WHITE, 2, 940, 300, 980, 300);
+        ref_->SendUIFigure(robot_id, client_id, fig_bot2);
+
+        break;
+      }
+      default:
+        break;
     }
+    this->ui_step_ = (this->ui_step_ + 1) % 5;  // 更新为7个case (0-6)
   }
 };
