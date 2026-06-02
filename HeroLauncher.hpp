@@ -72,7 +72,7 @@ required_hardware:
 depends:
   - qdu-future/RMMotor
   - qdu-future/CMD
-  - xrobot-org/Referee
+  - qdu-future/Referee
 === END MANIFEST === */
 // clang-format on
 
