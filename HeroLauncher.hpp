@@ -89,6 +89,7 @@ depends:
 #include "event.hpp"
 #include "libxr_def.hpp"
 #include "libxr_time.hpp"
+#include "logger.hpp"
 #include "mutex.hpp"
 #include "pid.hpp"
 #include "thread.hpp"
@@ -311,7 +312,10 @@ class HeroLauncher {
 
   RMMotor* motor_trig_;
 
+  std::array<LibXR::ErrorCode, FRIC_NUM> fric_motor_status_{};
+  LibXR::ErrorCode trig_motor_status_ = LibXR::ErrorCode::OK;
   bool motors_online_ = false;
+  bool motor_fault_latched_ = false;
 
   float trig_setpoint_angle_ = 0.0f;
   float trig_setpoint_speed_ = 0.0f;
@@ -404,11 +408,18 @@ class HeroLauncher {
     bool motors_online = true;
     for (int i = 0; i < FRIC_NUM; i++) {
       const auto FRIC_STATUS = fric_motor_[i]->Update();
+      fric_motor_status_[i] = FRIC_STATUS;
       motors_online = FRIC_STATUS == LibXR::ErrorCode::OK && motors_online;
       param_motor_fric_[i] = fric_motor_[i]->GetFeedback();
     }
     const auto TRIG_STATUS = motor_trig_->Update();
+    trig_motor_status_ = TRIG_STATUS;
     motors_online_ = motors_online && TRIG_STATUS == LibXR::ErrorCode::OK;
+    if (!motors_online_ && !motor_fault_latched_) {
+      motor_fault_latched_ = true;
+      LogMotorFault();
+      Reset();
+    }
     param_trig_ = motor_trig_->GetFeedback();
     const float DELTA_MOTOR_ANGLE =
         LibXR::CycleValue<float>(param_trig_.abs_angle) - LAST_TRIG_MOTOR_ANGLE;
@@ -431,7 +442,7 @@ class HeroLauncher {
    * @details 拨弹控制、发弹检测和摩擦轮PID输出。
    */
   void Control() {
-    if (!motors_online_) {
+    if (motor_fault_latched_ || !motors_online_) {
       motor_trig_->Relax();
       for (Motor* const MOTOR : fric_motor_) {
         MOTOR->Relax();
@@ -455,6 +466,12 @@ class HeroLauncher {
    * @param mode 事件ID，对应 LauncherEvent
    */
   void SetMode(uint32_t mode) {
+    if (motor_fault_latched_) {
+      if (!motors_online_) {
+        return;
+      }
+      motor_fault_latched_ = false;
+    }
     launcher_state_ = static_cast<LauncherEvent>(mode);
   }
 
@@ -512,6 +529,9 @@ class HeroLauncher {
    * @details 将所有发射相关的状态变量、标志位、时间戳和角度值重置到初始状态。
    */
   void Reset() {
+    launcher_state_ = LauncherEvent::SET_FRICMODE_RELAX;
+    trig_mode_ = TrigMode::RELAX;
+
     first_loading_ = true;
     fire_flag_ = false;
     enable_fire_ = false;
@@ -529,15 +549,33 @@ class HeroLauncher {
     trig_angle_ = 0.0f;
     trig_zero_angle_ = 0.0f;
     trig_setpoint_angle_ = 0.0f;
+    trig_setpoint_speed_ = 0.0f;
+    trig_output_ = 0.0f;
+    cmd_trig_.velocity = 0.0f;
 
     delay_time_ = 0;
 
     soft_start_finish_ = false;
 
     for (int i = 0; i < FRIC_NUM; i++) {
+      fric_target_rpm_[i] = 0.0f;
+      cmd_fric_[i].velocity = 0.0f;
       fric_motor_[i]->Relax();
     }
     motor_trig_->Relax();
+  }
+
+  void LogMotorFault() {
+    for (int i = 0; i < FRIC_NUM; i++) {
+      if (fric_motor_status_[i] != LibXR::ErrorCode::OK) {
+        XR_LOG_ERROR("HeroLauncher fric[%d] status=%d", i,
+                     static_cast<int>(fric_motor_status_[i]));
+      }
+    }
+    if (trig_motor_status_ != LibXR::ErrorCode::OK) {
+      XR_LOG_ERROR("HeroLauncher trigger status=%d",
+                   static_cast<int>(trig_motor_status_));
+    }
   }
 
   /**
