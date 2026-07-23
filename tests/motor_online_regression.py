@@ -37,6 +37,7 @@ def require(pattern: str, text: str, message: str) -> None:
 
 
 def validate(source: str) -> None:
+    thread_func = function_body(source, "ThreadFunc")
     update = function_body(source, "Update")
     control = function_body(source, "Control")
     set_mode = function_body(source, "SetMode")
@@ -75,6 +76,12 @@ def validate(source: str) -> None:
         "Update() must retain each friction motor status for diagnostics",
     )
     require(
+        r"previous_fric_motor_status_\s*\[\s*i\s*\]\s*=\s*"
+        r"fric_motor_status_\s*\[\s*i\s*\]\s*;",
+        update,
+        "Update() must preserve each previous friction motor status",
+    )
+    require(
         r"motors_online\s*=\s*FRIC_STATUS\s*==\s*LibXR::ErrorCode::OK\s*"
         r"&&\s*motors_online\s*;",
         update,
@@ -91,22 +98,32 @@ def validate(source: str) -> None:
         "Update() must retain trigger status for diagnostics",
     )
     require(
+        r"previous_trig_motor_status_\s*=\s*trig_motor_status_\s*;",
+        update,
+        "Update() must preserve the previous trigger status",
+    )
+    require(
         r"motors_online_\s*=\s*motors_online\s*&&\s*"
         r"TRIG_STATUS\s*==\s*LibXR::ErrorCode::OK\s*;",
         update,
         "motors_online_ must combine friction and trigger status",
     )
     require(
+        r"LogMotorFaultTransitions\(\)\s*;\s*"
         r"if\s*\(\s*!motors_online_\s*&&\s*!motor_fault_latched_\s*\)\s*\{\s*"
-        r"motor_fault_latched_\s*=\s*true\s*;\s*LogMotorFault\(\)\s*;\s*"
-        r"Reset\(\)\s*;\s*\}",
+        r"motor_fault_latched_\s*=\s*true\s*;\s*Reset\(\)\s*;\s*\}",
         update,
-        "Update() must latch and diagnose only the first offline transition",
+        "Update() must diagnose per-motor transitions and latch the aggregate fault",
     )
     if re.search(r"motor_fault_latched_\s*=\s*false", update):
         raise AssertionError("online Update() must not automatically clear the fault latch")
-    if source.count("LogMotorFault();") != 1:
-        raise AssertionError("fault diagnostics must run only on the first fault transition")
+
+    require(
+        r"mutex_\.Lock\(\)\s*;\s*self->Update\(\)\s*;\s*self->Solve\(\)\s*;\s*"
+        r"self->Control\(\)\s*;\s*self->mutex_\.Unlock\(\)\s*;",
+        thread_func,
+        "ThreadFunc() must keep Update, Solve, and Control under one mutex ownership",
+    )
 
     guard = re.match(
         r"\s*if\s*\(\s*motor_fault_latched_\s*\|\|\s*!motors_online_\s*\)\s*\{",
@@ -130,12 +147,17 @@ def validate(source: str) -> None:
     require(r"return\s*;", guard_body, "offline guard must return before PID output")
 
     require(
-        r"if\s*\(\s*motor_fault_latched_\s*\)\s*\{\s*"
-        r"if\s*\(\s*!motors_online_\s*\)\s*\{\s*return\s*;\s*\}\s*"
-        r"motor_fault_latched_\s*=\s*false\s*;\s*\}\s*"
-        r"launcher_state_\s*=\s*static_cast<LauncherEvent>\(mode\)\s*;",
+        r"const\s+auto\s+REQUESTED_MODE\s*=\s*"
+        r"static_cast<LauncherEvent>\(mode\)\s*;\s*"
+        r"if\s*\(\s*!motors_online_\s*\)\s*\{\s*"
+        r"motor_fault_latched_\s*=\s*true\s*;\s*"
+        r"if\s*\(\s*REQUESTED_MODE\s*!=\s*LauncherEvent::SET_FRICMODE_RELAX\s*&&\s*"
+        r"REQUESTED_MODE\s*!=\s*LauncherEvent::SET_FRICMODE_SAFE\s*\)\s*\{\s*"
+        r"return\s*;\s*\}\s*launcher_state_\s*=\s*REQUESTED_MODE\s*;\s*return\s*;\s*\}\s*"
+        r"motor_fault_latched_\s*=\s*false\s*;\s*"
+        r"launcher_state_\s*=\s*REQUESTED_MODE\s*;",
         set_mode,
-        "SetMode() must ignore offline requests and only a later fresh request may unlock",
+        "SetMode() must latch startup/offline state, reject unsafe prearm, and only rearm online",
     )
 
     require(
@@ -157,11 +179,13 @@ def validate(source: str) -> None:
             f"Reset() must clear {flag}",
         )
 
-    log_motor_fault = function_body(source, "LogMotorFault")
+    log_motor_fault = function_body(source, "LogMotorFaultTransitions")
     require(
+        r"fric_motor_status_\s*\[\s*i\s*\]\s*!=\s*"
+        r"previous_fric_motor_status_\s*\[\s*i\s*\]\s*&&\s*"
         r"fric_motor_status_\s*\[\s*i\s*\]\s*!=\s*LibXR::ErrorCode::OK",
         log_motor_fault,
-        "fault diagnostics must identify failed friction motors",
+        "diagnostics must log every friction motor transition to non-OK",
     )
     require(
         r"XR_LOG_ERROR\([^;]*i[^;]*fric_motor_status_\s*\[\s*i\s*\]",
@@ -169,9 +193,10 @@ def validate(source: str) -> None:
         "friction fault log must contain motor index and status",
     )
     require(
+        r"trig_motor_status_\s*!=\s*previous_trig_motor_status_\s*&&\s*"
         r"trig_motor_status_\s*!=\s*LibXR::ErrorCode::OK",
         log_motor_fault,
-        "fault diagnostics must identify trigger failure",
+        "diagnostics must log every trigger transition to non-OK",
     )
     require(
         r"XR_LOG_ERROR\([^;]*trig_motor_status_",
@@ -180,24 +205,54 @@ def validate(source: str) -> None:
     )
 
 
+def require_mutation_killed(description: str, mutated_source: str) -> None:
+    if mutated_source == SOURCE:
+        raise AssertionError(f"mutation target was not found: {description}")
+    try:
+        validate(mutated_source)
+    except AssertionError:
+        return
+    raise AssertionError(f"mutation survived: {description}")
+
+
 def main() -> None:
     validate(SOURCE)
 
-    automatic_unlock = SOURCE.replace(
-        "if (motor_fault_latched_ || !motors_online_)",
-        "if (!motors_online_)",
-        1,
+    require_mutation_killed(
+        "online recovery bypassed the fault latch",
+        SOURCE.replace(
+            "if (motor_fault_latched_ || !motors_online_)",
+            "if (!motors_online_)",
+            1,
+        ),
     )
-    if automatic_unlock == SOURCE:
-        raise AssertionError("recovery-latch mutation target was not found")
-    try:
-        validate(automatic_unlock)
-    except AssertionError:
-        pass
-    else:
-        raise AssertionError("mutation survived: online recovery bypassed the fault latch")
+    require_mutation_killed(
+        "startup READY request bypassed the offline gate",
+        SOURCE.replace(
+            "if (!motors_online_) {\n      motor_fault_latched_ = true;",
+            "if (motor_fault_latched_ && !motors_online_) {\n"
+            "      motor_fault_latched_ = true;",
+            1,
+        ),
+    )
+    require_mutation_killed(
+        "second motor fault transition was not diagnosed",
+        SOURCE.replace(
+            "fric_motor_status_[i] != previous_fric_motor_status_[i] &&",
+            "motor_fault_latched_ == false &&",
+            1,
+        ),
+    )
+    require_mutation_killed(
+        "Control ran after releasing the state mutex",
+        SOURCE.replace(
+            "self->Control();\n      self->mutex_.Unlock();",
+            "self->mutex_.Unlock();\n      self->Control();",
+            1,
+        ),
+    )
 
-    print("HeroLauncher all-motor online regression: PASS (1 mutation killed)")
+    print("HeroLauncher all-motor online regression: PASS (4 mutations killed)")
 
 
 if __name__ == "__main__":

@@ -276,8 +276,8 @@ class HeroLauncher {
       self->mutex_.Lock();
       self->Update();
       self->Solve();
-      self->mutex_.Unlock();
       self->Control();
+      self->mutex_.Unlock();
     }
   }
 
@@ -313,7 +313,9 @@ class HeroLauncher {
   RMMotor* motor_trig_;
 
   std::array<LibXR::ErrorCode, FRIC_NUM> fric_motor_status_{};
+  std::array<LibXR::ErrorCode, FRIC_NUM> previous_fric_motor_status_{};
   LibXR::ErrorCode trig_motor_status_ = LibXR::ErrorCode::OK;
+  LibXR::ErrorCode previous_trig_motor_status_ = LibXR::ErrorCode::OK;
   bool motors_online_ = false;
   bool motor_fault_latched_ = false;
 
@@ -407,17 +409,19 @@ class HeroLauncher {
         LibXR::CycleValue<float>(param_trig_.abs_angle);
     bool motors_online = true;
     for (int i = 0; i < FRIC_NUM; i++) {
+      previous_fric_motor_status_[i] = fric_motor_status_[i];
       const auto FRIC_STATUS = fric_motor_[i]->Update();
       fric_motor_status_[i] = FRIC_STATUS;
       motors_online = FRIC_STATUS == LibXR::ErrorCode::OK && motors_online;
       param_motor_fric_[i] = fric_motor_[i]->GetFeedback();
     }
+    previous_trig_motor_status_ = trig_motor_status_;
     const auto TRIG_STATUS = motor_trig_->Update();
     trig_motor_status_ = TRIG_STATUS;
     motors_online_ = motors_online && TRIG_STATUS == LibXR::ErrorCode::OK;
+    LogMotorFaultTransitions();
     if (!motors_online_ && !motor_fault_latched_) {
       motor_fault_latched_ = true;
-      LogMotorFault();
       Reset();
     }
     param_trig_ = motor_trig_->GetFeedback();
@@ -466,13 +470,18 @@ class HeroLauncher {
    * @param mode 事件ID，对应 LauncherEvent
    */
   void SetMode(uint32_t mode) {
-    if (motor_fault_latched_) {
-      if (!motors_online_) {
+    const auto REQUESTED_MODE = static_cast<LauncherEvent>(mode);
+    if (!motors_online_) {
+      motor_fault_latched_ = true;
+      if (REQUESTED_MODE != LauncherEvent::SET_FRICMODE_RELAX &&
+          REQUESTED_MODE != LauncherEvent::SET_FRICMODE_SAFE) {
         return;
       }
-      motor_fault_latched_ = false;
+      launcher_state_ = REQUESTED_MODE;
+      return;
     }
-    launcher_state_ = static_cast<LauncherEvent>(mode);
+    motor_fault_latched_ = false;
+    launcher_state_ = REQUESTED_MODE;
   }
 
   /**
@@ -565,14 +574,16 @@ class HeroLauncher {
     motor_trig_->Relax();
   }
 
-  void LogMotorFault() {
+  void LogMotorFaultTransitions() {
     for (int i = 0; i < FRIC_NUM; i++) {
-      if (fric_motor_status_[i] != LibXR::ErrorCode::OK) {
+      if (fric_motor_status_[i] != previous_fric_motor_status_[i] &&
+          fric_motor_status_[i] != LibXR::ErrorCode::OK) {
         XR_LOG_ERROR("HeroLauncher fric[%d] status=%d", i,
                      static_cast<int>(fric_motor_status_[i]));
       }
     }
-    if (trig_motor_status_ != LibXR::ErrorCode::OK) {
+    if (trig_motor_status_ != previous_trig_motor_status_ &&
+        trig_motor_status_ != LibXR::ErrorCode::OK) {
       XR_LOG_ERROR("HeroLauncher trigger status=%d",
                    static_cast<int>(trig_motor_status_));
     }
