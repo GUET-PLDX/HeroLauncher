@@ -311,7 +311,7 @@ class HeroLauncher {
 
   RMMotor* motor_trig_;
 
-  LibXR::ErrorCode motor_state_;
+  bool motors_online_ = false;
 
   float trig_setpoint_angle_ = 0.0f;
   float trig_setpoint_speed_ = 0.0f;
@@ -401,11 +401,14 @@ class HeroLauncher {
 
     const float LAST_TRIG_MOTOR_ANGLE =
         LibXR::CycleValue<float>(param_trig_.abs_angle);
+    bool motors_online = true;
     for (int i = 0; i < FRIC_NUM; i++) {
-      fric_motor_[i]->Update();
+      const auto FRIC_STATUS = fric_motor_[i]->Update();
+      motors_online = FRIC_STATUS == LibXR::ErrorCode::OK && motors_online;
       param_motor_fric_[i] = fric_motor_[i]->GetFeedback();
     }
-    motor_state_ = motor_trig_->Update();
+    const auto TRIG_STATUS = motor_trig_->Update();
+    motors_online_ = motors_online && TRIG_STATUS == LibXR::ErrorCode::OK;
     param_trig_ = motor_trig_->GetFeedback();
     const float DELTA_MOTOR_ANGLE =
         LibXR::CycleValue<float>(param_trig_.abs_angle) - LAST_TRIG_MOTOR_ANGLE;
@@ -428,19 +431,23 @@ class HeroLauncher {
    * @details 拨弹控制、发弹检测和摩擦轮PID输出。
    */
   void Control() {
-    if (motor_state_ == LibXR::ErrorCode::OK) {
-      if (first_loading_) {
-        FirstLoadingControl();
-      } else {
-        NormalFireControl();
+    if (!motors_online_) {
+      motor_trig_->Relax();
+      for (Motor* const MOTOR : fric_motor_) {
+        MOTOR->Relax();
       }
-      real_launch_delay_ =
-          (finish_fire_time_ - start_fire_time_).ToMillisecond();
-      FricPidControl();
-      TrigPidControl();
-    } else {
       Reset();
+      return;
     }
+
+    if (first_loading_) {
+      FirstLoadingControl();
+    } else {
+      NormalFireControl();
+    }
+    real_launch_delay_ = (finish_fire_time_ - start_fire_time_).ToMillisecond();
+    FricPidControl();
+    TrigPidControl();
   }
 
   /**
