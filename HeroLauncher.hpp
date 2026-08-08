@@ -70,9 +70,9 @@ template_args: []
 required_hardware:
   - motor
 depends:
-  - qdu-future/RMMotor
-  - qdu-future/CMD
-  - qdu-future/Referee
+  - pldx/RMMotor
+  - pldx/CMD
+  - pldx/Referee
 === END MANIFEST === */
 // clang-format on
 
