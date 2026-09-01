@@ -855,8 +855,8 @@ class HeroLauncher {
                             : Referee::UIColor::UI_COLOR_ORANGE;
 
     // 拨弹盘位置计算
-    float trig_pos =
-        LibXR::CycleValue<float>(-this->trig_angle_) / 6.2832f * 360.0f;
+    float trig_pos = LibXR::CycleValue<float>(-this->trig_angle_) /
+                     static_cast<float>(LibXR::TWO_PI) * 360.0f;
     uint16_t arc_mid = static_cast<uint16_t>(trig_pos);
     uint16_t arc_start = static_cast<uint16_t>((arc_mid + 330) % 360);
     uint16_t arc_end = static_cast<uint16_t>((arc_mid + 30) % 360);
