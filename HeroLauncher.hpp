@@ -818,8 +818,7 @@ class HeroLauncher {
       heat_ctrl_.heat += heat_ctrl_.heat_increase;
       fired_ = 0;
     }
-    heat_ctrl_.heat -=
-        heat_ctrl_.cooling_rate / (1 / dt_);  // 每个控制周期的冷却恢复
+    heat_ctrl_.heat -= heat_ctrl_.cooling_rate * dt_;  // 每个控制周期的冷却恢复
     heat_ctrl_.heat = std::max(heat_ctrl_.heat, 0.0f);
     float available_float =
         (this->heat_ctrl_.heat_limit - this->heat_ctrl_.heat) /
