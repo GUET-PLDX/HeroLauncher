@@ -255,7 +255,7 @@ class HeroLauncher {
     self->last_online_time_ = LibXR::Timebase::GetMicroseconds();
 
     while (true) {
-      LibXR::Thread::Sleep(2);
+      LibXR::Thread::SleepUntil(self->last_wakeup_time_, 2);
 
       auto now = LibXR::Timebase::GetMicroseconds();
       self->dt_ = (now - self->last_online_time_).ToSecondf();
