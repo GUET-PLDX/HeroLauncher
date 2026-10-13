@@ -2,77 +2,10 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: 英雄发射机构独立实现，负责摩擦轮、拨弹盘控制与热量约束发射逻辑
-constructor_args:
-  - task_stack_depth: 1536
-  - launcher_param:
-      trig_gear_ratio: 19.2032
-      num_trig_tooth: 6
-      speed_sync: false
-  - cmd: '@&cmd'
-  - fric_setpoint_speed_0: 3900.0
-  - fric_setpoint_speed_1: 2700.0
-  - pid_trig_angle:
-      k: 1.0
-      p: 2000.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 2000.0
-      cycle: true
-  - pid_trig_speed:
-      k: 1.0
-      p: 0.0013
-      i: 0.0
-      d: 0.0
-      i_limit: 1.0
-      out_limit: 1.0
-      cycle: false
-  - pid_fric_speed_0:
-      k: 1.0
-      p: 0.0003
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 1.0
-      cycle: false
-  - pid_fric_speed_1:
-      k: 1.0
-      p: 0.0003
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 1.0
-      cycle: false
-  - pid_fric_speed_2:
-      k: 1.0
-      p: 0.0003
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 1.0
-      cycle: false
-  - pid_fric_speed_3:
-      k: 1.0
-      p: 0.0003
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 1.0
-      cycle: false
-  - fric_motor_0: '@&motor_fric_front_left'
-  - fric_motor_1: '@&motor_fric_front_right'
-  - fric_motor_2: '@&motor_fric_back_left'
-  - fric_motor_3: '@&motor_fric_back_right'
-  - motor_trig_: '@&motor_trig'
-  - referee: '@&ref'
-  - thread_priority: LibXR::Thread::Priority::MEDIUM
-template_args: []
-required_hardware:
-  - motor
 depends:
-  - pldx/RMMotor
-  - pldx/CMD
-  - pldx/Referee
+- id: GUET-PLDX/RMMotor
+- id: GUET-PLDX/CMD
+- id: GUET-PLDX/Referee
 === END MANIFEST === */
 // clang-format on
 
@@ -84,9 +17,9 @@ depends:
 #include "Motor.hpp"
 #include "RMMotor.hpp"
 #include "Referee.hpp"
-#include "app_framework.hpp"
 #include "cycle_value.hpp"
 #include "event.hpp"
+#include "libxr.hpp"
 #include "libxr_def.hpp"
 #include "libxr_time.hpp"
 #include "logger.hpp"
@@ -139,8 +72,6 @@ class HeroLauncher {
   };
   /**
    * @brief 构造 HeroLauncher
-   * @param hw 硬件容器
-   * @param app 应用管理器
    * @param task_stack_depth 线程栈深
    * @param launcher_param 发射器参数
    * @param cmd CMD 模块指针
@@ -158,7 +89,6 @@ class HeroLauncher {
    * @param thread_priority 线程优先级
    */
   HeroLauncher(
-      LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
       uint32_t task_stack_depth, LauncherParam launcher_param, CMD* cmd,
       float fric_setpoint_speed_0, float fric_setpoint_speed_1,
       LibXR::PID<float>::Param pid_trig_angle,
